@@ -1,0 +1,41 @@
+; 8N1 UART transmitter that drives its pin open-drain: the pin's output value stays 0 and only its direction changes, so the
+; line is driven low or released, never driven high. A pull-up brings the line high. The words written to the FIFO must hold the
+; byte inverted (a 1 bit drives the line low).
+
+.program uart_tx_od
+.side_set 1 opt pindirs
+
+    pull       side 0 [7]
+    set x, 7   side 1 [7]
+bitloop:
+    out pindirs, 1
+    jmp x-- bitloop   [6]
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline float uart_tx_od_clkdiv(uint baud) {
+    float div = (float)clock_get_hz(clk_sys) / (8.0f * (float)(baud ? baud : 1));
+    return div > 65535.0f ? 65535.0f : (div < 1.0f ? 1.0f : div);
+}
+
+static inline void uart_tx_od_program_init(PIO pio, uint sm, uint offset, uint pin, uint baud) {
+    pio_sm_set_pins_with_mask(pio, sm, 0u, 1u << pin);
+    pio_sm_set_pindirs_with_mask(pio, sm, 0u, 1u << pin);
+    pio_gpio_init(pio, pin);
+    gpio_pull_up(pin);
+
+    pio_sm_config c = uart_tx_od_program_get_default_config(offset);
+    sm_config_set_out_shift(&c, true, false, 32);
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_sideset_pins(&c, pin);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&c, uart_tx_od_clkdiv(baud));
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void uart_tx_od_putc(PIO pio, uint sm, uint8_t c) {
+    pio_sm_put_blocking(pio, sm, (uint32_t)(uint8_t)~c);
+}
+%}

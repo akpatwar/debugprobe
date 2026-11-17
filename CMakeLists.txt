@@ -46,6 +46,19 @@ pico_generate_pio_header(debugprobe ${CMAKE_CURRENT_LIST_DIR}/src/probe.pio)
 pico_generate_pio_header(debugprobe ${CMAKE_CURRENT_LIST_DIR}/src/probe_oen.pio)
 pico_generate_pio_header(debugprobe ${CMAKE_CURRENT_LIST_DIR}/src/autobaud.pio)
 
+# Single-wire UART for the Raspberry Pi Debug Probe: transmit open-drain on GPIO6, which shares the RX pin of the UART connector
+# with the receiver (GPIO5), so one wire carries both directions. The TX pin (GPIO4) becomes an open-drain reset output for the target's
+# NRST: pulled low while the host holds a CDC break, released otherwise.
+option(PROBE_UART_SINGLE_WIRE "Single-wire half-duplex UART on the RX pin, reset output on the TX pin" OFF)
+if (PROBE_UART_SINGLE_WIRE)
+    if (NOT PICO_BOARD STREQUAL "debug_probe")
+        message(FATAL_ERROR "PROBE_UART_SINGLE_WIRE needs PICO_BOARD debug_probe (it uses GPIO6, wired to the UART RX pin)")
+    endif ()
+    pico_generate_pio_header(debugprobe ${CMAKE_CURRENT_LIST_DIR}/src/uart_tx_od.pio)
+    target_compile_definitions(debugprobe PRIVATE PROBE_UART_SINGLE_WIRE PROBE_UART_SINGLE_WIRE_PIN=6)
+    set_target_properties(debugprobe PROPERTIES OUTPUT_NAME "debugprobe_single_wire")
+endif ()
+
 target_include_directories(debugprobe PRIVATE src)
 
 # add version

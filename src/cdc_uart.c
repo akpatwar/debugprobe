@@ -31,6 +31,14 @@
 
 #include "probe_config.h"
 
+#ifdef PROBE_UART_SINGLE_WIRE
+#include "hardware/pio.h"
+#include "uart_tx_od.pio.h"
+
+static PIO single_wire_pio = pio1;
+static uint single_wire_sm;
+#endif
+
 TaskHandle_t uart_taskhandle;
 TickType_t last_wake, interval = 100;
 volatile TickType_t break_expiry;
@@ -53,10 +61,39 @@ static uint rx_led_debounce;
 
 static BaudInfo_t baud_info;
 
+/* In single-wire mode the CDC break drives the reset line on the TX pin, open-drain: pulled low during a break, released otherwise
+ * (the target's NRST pull-up holds it high). */
+static void cdc_uart_set_break(bool on) {
+#ifdef PROBE_UART_SINGLE_WIRE
+    gpio_set_dir(PROBE_UART_TX, on ? GPIO_OUT : GPIO_IN);
+#else
+    uart_set_break(PROBE_UART_INTERFACE, on);
+#endif
+}
+
+static void cdc_uart_write(const uint8_t *buf, size_t len) {
+#ifdef PROBE_UART_SINGLE_WIRE
+    for (size_t i = 0; i < len; i++)
+        uart_tx_od_putc(single_wire_pio, single_wire_sm, buf[i]);
+#else
+    uart_write_blocking(PROBE_UART_INTERFACE, buf, len);
+#endif
+}
+
 void cdc_uart_init(void) {
+#ifdef PROBE_UART_SINGLE_WIRE
+    gpio_init(PROBE_UART_TX);
+    gpio_disable_pulls(PROBE_UART_TX);
+    gpio_put(PROBE_UART_TX, 0);
+    gpio_set_dir(PROBE_UART_TX, GPIO_IN);
+    single_wire_sm = pio_claim_unused_sm(single_wire_pio, true);
+    uart_tx_od_program_init(single_wire_pio, single_wire_sm, pio_add_program(single_wire_pio, &uart_tx_od_program),
+                            PROBE_UART_SINGLE_WIRE_PIN, PROBE_UART_BAUDRATE);
+#else
     gpio_set_function(PROBE_UART_TX, GPIO_FUNC_UART);
-    gpio_set_function(PROBE_UART_RX, GPIO_FUNC_UART);
     gpio_set_pulls(PROBE_UART_TX, 1, 0);
+#endif
+    gpio_set_function(PROBE_UART_RX, GPIO_FUNC_UART);
     gpio_set_pulls(PROBE_UART_RX, 1, 0);
     uart_init(PROBE_UART_INTERFACE, PROBE_UART_BAUDRATE);
 
@@ -145,7 +182,7 @@ bool cdc_task(void)
         /* Batch up to half a FIFO of data - don't clog up on RX */
         watermark = MIN(watermark, 16);
         tx_len = tud_cdc_read(tx_buf, watermark);
-        uart_write_blocking(PROBE_UART_INTERFACE, tx_buf, tx_len);
+        cdc_uart_write(tx_buf, tx_len);
       } else {
 #ifdef PROBE_UART_TX_LED
           if (tx_led_debounce)
@@ -158,7 +195,7 @@ bool cdc_task(void)
       if (timed_break) {
         if (((int)break_expiry - (int)xTaskGetTickCount()) < 0) {
           timed_break = false;
-          uart_set_break(PROBE_UART_INTERFACE, false);
+          cdc_uart_set_break(false);
 #ifdef PROBE_UART_TX_LED
           tx_led_debounce = 0;
 #endif
@@ -168,7 +205,7 @@ bool cdc_task(void)
       }
     } else if (was_connected) {
       tud_cdc_write_clear();
-      uart_set_break(PROBE_UART_INTERFACE, false);
+      cdc_uart_set_break(false);
       timed_break = false;
       was_connected = 0;
 #ifdef PROBE_UART_TX_LED
@@ -193,6 +230,9 @@ void cdc_uart_set_baudrate(uint32_t baudrate) {
   tud_cdc_read_flush();
 
   uart_init(PROBE_UART_INTERFACE, baudrate);
+#ifdef PROBE_UART_SINGLE_WIRE
+  pio_sm_set_clkdiv(single_wire_pio, single_wire_sm, uart_tx_od_clkdiv(baudrate));
+#endif
 }
 
 void cdc_thread(void *ptr)
@@ -316,14 +356,14 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 void tud_cdc_send_break_cb(uint8_t itf, uint16_t wValue) {
   switch(wValue) {
     case 0:
-    uart_set_break(PROBE_UART_INTERFACE, false);
+    cdc_uart_set_break(false);
     timed_break = false;
 #ifdef PROBE_UART_TX_LED
     tx_led_debounce = 0;
 #endif
     break;
     case 0xffff:
-    uart_set_break(PROBE_UART_INTERFACE, true);
+    cdc_uart_set_break(true);
     timed_break = false;
 #ifdef PROBE_UART_TX_LED
     gpio_put(PROBE_UART_TX_LED, 1);
@@ -331,7 +371,7 @@ void tud_cdc_send_break_cb(uint8_t itf, uint16_t wValue) {
 #endif
     break;
     default:
-    uart_set_break(PROBE_UART_INTERFACE, true);
+    cdc_uart_set_break(true);
     timed_break = true;
 #ifdef PROBE_UART_TX_LED
     gpio_put(PROBE_UART_TX_LED, 1);

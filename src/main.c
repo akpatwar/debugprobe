@@ -152,7 +152,10 @@ int main(void) {
     usb_serial_init();
     cdc_uart_init();
     tusb_init();
+#ifndef PROBE_UART_SINGLE_WIRE
+    /* The default stdio UART's TX pin is the single-wire build's reset output, so stdio stays off there. */
     stdio_uart_init();
+#endif
 
     DAP_Setup();
 
